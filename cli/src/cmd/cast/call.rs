@@ -4,17 +4,19 @@ use crate::{
         cast::{parse_block_id, parse_name_or_address},
         EthereumOpts, TransactionOpts,
     },
-    utils::parse_ether_value,
+    utils::parse_ether_value, cmd::cast::zk_utils::zk_utils::get_rpc_url,
 };
 use cast::{Cast, TxBuilder};
 use clap::Parser;
 use ethers::{
     providers::Middleware,
-    types::{Address, BlockId, NameOrAddress, U256},
+    types::{BlockId, NameOrAddress, U256},
 };
 use eyre::WrapErr;
-use foundry_common::try_get_http_provider;
+use foundry_common::{try_get_http_provider, fmt::TokenDisplay};
 use foundry_config::{Chain, Config};
+use zksync_web3_rs::{providers::Provider, zks_provider::ZKSProvider};
+use zksync_web3_rs::types::{Address, H160};
 
 #[derive(Debug, Parser)]
 pub struct CallArgs {
@@ -76,51 +78,63 @@ impl CallArgs {
     pub async fn run(self) -> eyre::Result<()> {
         let CallArgs { to, sig, args, data, tx, eth, command, block } = self;
         let config = Config::from(&eth);
-        let provider = try_get_http_provider(config.get_rpc_url_or_localhost_http()?)?;
+        //let provider = try_get_http_provider(config.get_rpc_url_or_localhost_http()?)?;
+        let rpc_url = get_rpc_url(&eth.rpc_url)?;
+        let provider = Provider::try_from(rpc_url)?;
+        let to_address = get_to_address(to);
+        let mut output = vec![];
 
-        let chain: Chain =
-            if let Some(chain) = eth.chain { chain } else { provider.get_chainid().await?.into() };
+        // let chain: Chain =
+        //     if let Some(chain) = eth.chain { chain } else { provider.get_chainid().await?.into() };
 
-        let from = eth.wallet.from.unwrap_or(Address::zero());
-        let mut builder = TxBuilder::new(&provider, from, to, chain, tx.legacy).await?;
-        builder
-            .gas(tx.gas_limit)
-            .etherscan_api_key(config.get_etherscan_api_key(Some(chain)))
-            .gas_price(tx.gas_price)
-            .priority_gas_price(tx.priority_gas_price)
-            .nonce(tx.nonce);
+        // let from = eth.wallet.from.unwrap_or(Address::zero());
+        // let mut builder = TxBuilder::new(&provider, from, to, chain, tx.legacy).await?;
+        // builder
+        //     .gas(tx.gas_limit)
+        //     .etherscan_api_key(config.get_etherscan_api_key(Some(chain)))
+        //     .gas_price(tx.gas_price)
+        //     .priority_gas_price(tx.priority_gas_price)
+        //     .nonce(tx.nonce);
         match command {
-            Some(CallSubcommands::Create { code, sig, args, value }) => {
-                builder.value(value);
+            // Some(CallSubcommands::Create { code, sig, args, value }) => {
+            //     builder.value(value);
 
-                let mut data = hex::decode(code.strip_prefix("0x").unwrap_or(&code))?;
+            //     let mut data = hex::decode(code.strip_prefix("0x").unwrap_or(&code))?;
 
-                if let Some(s) = sig {
-                    let (mut sigdata, _func) = builder.create_args(&s, args).await?;
-                    data.append(&mut sigdata);
-                }
+            //     if let Some(s) = sig {
+            //         let (mut sigdata, _func) = builder.create_args(&s, args).await?;
+            //         data.append(&mut sigdata);
+            //     }
 
-                builder.set_data(data);
-            }
+            //     builder.set_data(data);
+            // }
             _ => {
-                builder.value(tx.value);
-
                 if let Some(sig) = sig {
-                    builder.set_args(sig.as_str(), args).await?;
+                    output = ZKSProvider::call(&provider, to_address, sig.as_str(), Some(args)).await?;
                 }
-                if let Some(data) = data {
-                    // Note: `sig+args` and `data` are mutually exclusive
-                    builder.set_data(
-                        hex::decode(data).wrap_err("Expected hex encoded function data")?,
-                    );
-                }
+                // if let Some(data) = data {
+                //     // Note: `sig+args` and `data` are mutually exclusive
+                //     builder.set_data(
+                //         hex::decode(data).wrap_err("Expected hex encoded function data")?,
+                //     );
+                // }
             }
         };
 
-        let builder_output = builder.build();
-        println!("{}", Cast::new(provider).call(builder_output, block).await?);
+        // let builder_output = builder.build();
+        println!("{:?}", output.iter()
+                .map(TokenDisplay)
+                .map(|token| token.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"));
         Ok(())
     }
+}
+
+fn get_to_address(to: Option<NameOrAddress>) -> H160 {
+    let to = to.as_ref().expect("Enter TO: Address");
+    let deployed_contract = to.as_address().expect("Invalid address").as_bytes();
+    Address::from_slice(deployed_contract)
 }
 
 #[cfg(test)]
